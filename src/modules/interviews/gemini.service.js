@@ -10,46 +10,54 @@ function buildSystemInstruction(scenarioContext) {
   const ctxJson = JSON.stringify(scenarioContext || {}, null, 2);
 
   return [
-    'You are a STRICT United States Consular Officer conducting a non-immigrant visa interview at a US Embassy / Consulate.',
+    'You are a STRICT United States Consular Officer conducting a non-immigrant visa interview.',
     '',
-    'RULES OF ENGAGEMENT:',
+    'CONVERSATION RULES — THESE ARE ABSOLUTE:',
+    '1. Ask ONE question at a time. ONE. Never ask two questions in the same turn.',
+    '2. After asking a question, STOP TALKING IMMEDIATELY and WAIT for the applicant to respond.',
+    '3. Keep each of your turns to 1-2 sentences maximum. Consular officers are terse.',
+    '4. Listen carefully to what the applicant says before deciding your next question.',
+    '5. Do NOT monologue. Do NOT list multiple questions. Do NOT give speeches.',
+    '',
+    'CHARACTER:',
     '- Stay fully in character. Never reveal you are an AI.',
-    '- Be terse, skeptical, and authoritative. Ask short, pointed questions.',
-    '- Probe inconsistencies. Interrupt if the applicant rambles.',
-    '- Demand specifics: dates, amounts, names of institutions, ties to home country, intent to return.',
-    '- Make a final decision only after sufficient questioning: APPROVED, ADMINISTRATIVE PROCESSING (221g), or REFUSED (214b).',
-    '- Do NOT coach the applicant. Do NOT explain consular procedure.',
+    '- Be terse, skeptical, and authoritative.',
+    '- Probe inconsistencies. If the applicant rambles, cut them off with a pointed follow-up.',
+    '- Demand specifics: dates, amounts, names of institutions, ties to home country.',
+    '- After 8-12 exchanges, make a final decision: APPROVED, 221(g), or 214(b) REFUSED.',
     '',
-    'SCENARIO CONTEXT (provided by the platform — treat as ground truth about the applicant\'s stated trip):',
-    '```json',
+    "SCENARIO CONTEXT (the applicant's stated trip):",
     ctxJson,
-    '```',
     '',
-    'Begin the interview by greeting the applicant and asking for their passport and the purpose of their visit.',
+    'Start with a short greeting and ask for the purpose of their visit. Nothing more.',
   ].join('\n');
 }
 
-/**
- * Opens a bi-directional live session with Gemini.
- *
- * @param {object} opts
- * @param {object} opts.scenarioContext  - Arbitrary JSON context injected into system instructions.
- * @param {(msg: object) => void} opts.onMessage  - Called for every server message from Gemini.
- * @param {(err: Error) => void}  opts.onError
- * @param {() => void}            opts.onClose
- * @returns {Promise<{session: any, close: () => Promise<void>}>}
- */
 async function openLiveSession({ scenarioContext, onMessage, onError, onClose }) {
   const systemInstruction = buildSystemInstruction(scenarioContext);
 
   const session = await client.live.connect({
     model: env.GEMINI_MODEL,
     config: {
-      responseModalities: [Modality.AUDIO, Modality.TEXT],
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: 'Kore' },
+        },
+      },
       systemInstruction: { parts: [{ text: systemInstruction }] },
+      // Server-side voice activity detection: Gemini will detect when the
+      // user starts speaking and automatically interrupt its own output.
+      realtimeInputConfig: {
+        automaticActivityDetection: {
+          disabled: false,
+        },
+      },
     },
     callbacks: {
-      onopen: () => logger.info('Gemini live session opened'),
+      onopen: () => {
+        logger.info('Gemini live session opened');
+      },
       onmessage: (msg) => {
         try {
           onMessage && onMessage(msg);
@@ -58,15 +66,32 @@ async function openLiveSession({ scenarioContext, onMessage, onError, onClose })
         }
       },
       onerror: (err) => {
-        logger.error('Gemini live session error:', err && err.message);
+        logger.error('Gemini live session error:', err && err.message, err);
         onError && onError(err);
       },
-      onclose: () => {
-        logger.info('Gemini live session closed');
+      onclose: (ev) => {
+        logger.info('Gemini live session closed', ev && ev.code, ev && ev.reason);
         onClose && onClose();
       },
     },
   });
+
+  // Kick off the conversation with a short prompt.
+  // The system instruction already constrains it to one greeting + one question.
+  try {
+    await session.sendClientContent({
+      turns: [
+        {
+          role: 'user',
+          parts: [{ text: 'The applicant has stepped up to the window.' }],
+        },
+      ],
+      turnComplete: true,
+    });
+    logger.info('Gemini initial prompt sent');
+  } catch (e) {
+    logger.error('Failed to send initial prompt:', e.message);
+  }
 
   return {
     session,

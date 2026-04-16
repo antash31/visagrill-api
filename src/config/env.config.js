@@ -34,7 +34,7 @@ const env = {
   RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET,
 
   GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-  GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp',
+  GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.5-flash-native-audio-preview-12-2025',
 };
 
 module.exports = env;

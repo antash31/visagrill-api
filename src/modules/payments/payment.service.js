@@ -27,7 +27,7 @@ async function createOrder({ userId, planId }) {
     notes: { user_id: userId, plan_id: planId },
   });
 
-  const { error } = await supabase.from('payment_orders').insert({
+  const { error } = await supabase.from('transactions').insert({
     razorpay_order_id: order.id,
     user_id: userId,
     plan_id: planId,
@@ -35,7 +35,7 @@ async function createOrder({ userId, planId }) {
     currency: plan.currency,
     status: 'created',
   });
-  if (error) logger.warn('payment_orders insert failed (non-fatal):', error.message);
+  if (error) logger.warn('transactions insert failed (non-fatal):', error.message);
 
   return { order, plan };
 }
@@ -54,11 +54,11 @@ function verifyCheckoutSignature({ razorpay_order_id, razorpay_payment_id, razor
 
 async function recordVerifiedPayment({ userId, orderId, paymentId }) {
   const { error } = await supabase
-    .from('payment_orders')
+    .from('transactions')
     .update({ status: 'paid', razorpay_payment_id: paymentId, paid_at: new Date().toISOString() })
     .eq('razorpay_order_id', orderId)
     .eq('user_id', userId);
-  if (error) logger.warn('payment_orders update failed:', error.message);
+  if (error) logger.warn('transactions update failed:', error.message);
 }
 
 function verifyWebhookSignature(rawBodyBuffer, signatureHeader) {
@@ -77,7 +77,7 @@ function verifyWebhookSignature(rawBodyBuffer, signatureHeader) {
 
 async function applyEntitlementsForOrder(orderId) {
   const { data: row, error } = await supabase
-    .from('payment_orders')
+    .from('transactions')
     .select('user_id, plan_id')
     .eq('razorpay_order_id', orderId)
     .single();
