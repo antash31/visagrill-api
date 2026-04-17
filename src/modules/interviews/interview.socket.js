@@ -60,14 +60,30 @@ function registerInterviewNamespace(io) {
           transcriptLog: [],
           gemini: null,
           ended: false,
+          promoted: false, // true once status moves to in_progress (point of no return)
         };
         activeSessions.set(interview.id, ctx);
 
         const gemini = await geminiService.openLiveSession({
           scenarioContext: interview.scenario_context || {},
-          onMessage: (msg) => {
+          onMessage: async (msg) => {
             // Forward the Gemini server message to the client.
             socket.emit('ai_message', msg);
+
+            // --- Point of No Return ---
+            // On the first AI message, promote to in_progress so the credit is burned.
+            if (!ctx.promoted) {
+              ctx.promoted = true;
+              try {
+                await interviewService.promoteToInProgress({
+                  interviewId: ctx.interviewId,
+                  userId: ctx.userId,
+                });
+                logger.info(`Interview ${ctx.interviewId} promoted to in_progress (credit burned)`);
+              } catch (e) {
+                logger.error('Failed to promote interview to in_progress:', e.message);
+              }
+            }
 
             // Best-effort transcript capture (model -> applicant).
             const text = extractText(msg);
@@ -140,16 +156,28 @@ async function finalizeAndCleanup(ctx, trigger) {
   }
 
   try {
-    await interviewService.finalizeInterview({
-      interviewId: ctx.interviewId,
-      userId: ctx.userId,
-      transcriptLog: ctx.transcriptLog,
-    });
-    logger.info(
-      `Interview ${ctx.interviewId} finalized (${trigger}) with ${ctx.transcriptLog.length} transcript entries`,
-    );
+    if (!ctx.promoted) {
+      // Interview never reached in_progress — refund the held credit.
+      const result = await interviewService.refundCreditIfAborted({
+        interviewId: ctx.interviewId,
+        userId: ctx.userId,
+      });
+      logger.info(
+        `Interview ${ctx.interviewId} aborted before start (${trigger}), refund=${result.refunded}`,
+      );
+    } else {
+      // Interview was in_progress — finalize normally (credit is burned).
+      await interviewService.finalizeInterview({
+        interviewId: ctx.interviewId,
+        userId: ctx.userId,
+        transcriptLog: ctx.transcriptLog,
+      });
+      logger.info(
+        `Interview ${ctx.interviewId} finalized (${trigger}) with ${ctx.transcriptLog.length} transcript entries`,
+      );
+    }
   } catch (e) {
-    logger.error('Failed to finalize interview:', e.message);
+    logger.error('Failed to finalize/refund interview:', e.message);
   } finally {
     activeSessions.delete(ctx.interviewId);
   }
