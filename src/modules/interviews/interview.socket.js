@@ -1,4 +1,5 @@
 'use strict';
+// #genai
 
 const { verifyToken } = require('../../middlewares/auth.middleware');
 const interviewService = require('./interview.service');
@@ -85,12 +86,23 @@ function registerInterviewNamespace(io) {
               }
             }
 
-            // Best-effort transcript capture (model -> applicant).
-            const text = extractText(msg);
-            if (text) {
+            // Best-effort transcript capture. Gemini streams these as
+            // partial deltas; we log each chunk and collapse later during
+            // feedback generation.
+            const officerText = extractText(msg);
+            if (officerText) {
               ctx.transcriptLog.push({
                 speaker: 'ai_officer',
-                text,
+                text: officerText,
+                timestamp: new Date().toISOString(),
+              });
+            }
+
+            const applicantText = extractInputTranscription(msg);
+            if (applicantText) {
+              ctx.transcriptLog.push({
+                speaker: 'applicant',
+                text: applicantText,
                 timestamp: new Date().toISOString(),
               });
             }
@@ -183,14 +195,39 @@ async function finalizeAndCleanup(ctx, trigger) {
   }
 }
 
+// Pull the officer's spoken text out of a Gemini live message.
+// With audio-only response modality, `modelTurn.parts[].text` is usually
+// empty; the real source is `serverContent.outputTranscription.text`,
+// which Gemini emits when outputAudioTranscription is enabled on the session.
 function extractText(msg) {
   try {
     if (!msg) return null;
+    const outputTx =
+      msg.serverContent &&
+      msg.serverContent.outputTranscription &&
+      msg.serverContent.outputTranscription.text;
+    if (outputTx) return outputTx;
+
     if (msg.text) return msg.text;
     const parts =
       (msg.serverContent && msg.serverContent.modelTurn && msg.serverContent.modelTurn.parts) || [];
     const texts = parts.map((p) => p.text).filter(Boolean);
     return texts.length ? texts.join(' ') : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pull the applicant's speech-to-text (server-side transcription of the
+// mic audio we streamed in). Requires inputAudioTranscription on the session.
+function extractInputTranscription(msg) {
+  try {
+    if (!msg) return null;
+    const inputTx =
+      msg.serverContent &&
+      msg.serverContent.inputTranscription &&
+      msg.serverContent.inputTranscription.text;
+    return inputTx || null;
   } catch {
     return null;
   }
