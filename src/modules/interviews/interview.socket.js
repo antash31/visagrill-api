@@ -1,4 +1,5 @@
 'use strict';
+// #genai
 
 const { verifyToken } = require('../../middlewares/auth.middleware');
 const interviewService = require('./interview.service');
@@ -60,21 +61,48 @@ function registerInterviewNamespace(io) {
           transcriptLog: [],
           gemini: null,
           ended: false,
+          promoted: false, // true once status moves to in_progress (point of no return)
         };
         activeSessions.set(interview.id, ctx);
 
         const gemini = await geminiService.openLiveSession({
           scenarioContext: interview.scenario_context || {},
-          onMessage: (msg) => {
+          onMessage: async (msg) => {
             // Forward the Gemini server message to the client.
             socket.emit('ai_message', msg);
 
-            // Best-effort transcript capture (model -> applicant).
-            const text = extractText(msg);
-            if (text) {
+            // --- Point of No Return ---
+            // On the first AI message, promote to in_progress so the credit is burned.
+            if (!ctx.promoted) {
+              ctx.promoted = true;
+              try {
+                await interviewService.promoteToInProgress({
+                  interviewId: ctx.interviewId,
+                  userId: ctx.userId,
+                });
+                logger.info(`Interview ${ctx.interviewId} promoted to in_progress (credit burned)`);
+              } catch (e) {
+                logger.error('Failed to promote interview to in_progress:', e.message);
+              }
+            }
+
+            // Best-effort transcript capture. Gemini streams these as
+            // partial deltas; we log each chunk and collapse later during
+            // feedback generation.
+            const officerText = extractText(msg);
+            if (officerText) {
               ctx.transcriptLog.push({
                 speaker: 'ai_officer',
-                text,
+                text: officerText,
+                timestamp: new Date().toISOString(),
+              });
+            }
+
+            const applicantText = extractInputTranscription(msg);
+            if (applicantText) {
+              ctx.transcriptLog.push({
+                speaker: 'applicant',
+                text: applicantText,
                 timestamp: new Date().toISOString(),
               });
             }
@@ -140,29 +168,66 @@ async function finalizeAndCleanup(ctx, trigger) {
   }
 
   try {
-    await interviewService.finalizeInterview({
-      interviewId: ctx.interviewId,
-      userId: ctx.userId,
-      transcriptLog: ctx.transcriptLog,
-    });
-    logger.info(
-      `Interview ${ctx.interviewId} finalized (${trigger}) with ${ctx.transcriptLog.length} transcript entries`,
-    );
+    if (!ctx.promoted) {
+      // Interview never reached in_progress — refund the held credit.
+      const result = await interviewService.refundCreditIfAborted({
+        interviewId: ctx.interviewId,
+        userId: ctx.userId,
+      });
+      logger.info(
+        `Interview ${ctx.interviewId} aborted before start (${trigger}), refund=${result.refunded}`,
+      );
+    } else {
+      // Interview was in_progress — finalize normally (credit is burned).
+      await interviewService.finalizeInterview({
+        interviewId: ctx.interviewId,
+        userId: ctx.userId,
+        transcriptLog: ctx.transcriptLog,
+      });
+      logger.info(
+        `Interview ${ctx.interviewId} finalized (${trigger}) with ${ctx.transcriptLog.length} transcript entries`,
+      );
+    }
   } catch (e) {
-    logger.error('Failed to finalize interview:', e.message);
+    logger.error('Failed to finalize/refund interview:', e.message);
   } finally {
     activeSessions.delete(ctx.interviewId);
   }
 }
 
+// Pull the officer's spoken text out of a Gemini live message.
+// With audio-only response modality, `modelTurn.parts[].text` is usually
+// empty; the real source is `serverContent.outputTranscription.text`,
+// which Gemini emits when outputAudioTranscription is enabled on the session.
 function extractText(msg) {
   try {
     if (!msg) return null;
+    const outputTx =
+      msg.serverContent &&
+      msg.serverContent.outputTranscription &&
+      msg.serverContent.outputTranscription.text;
+    if (outputTx) return outputTx;
+
     if (msg.text) return msg.text;
     const parts =
       (msg.serverContent && msg.serverContent.modelTurn && msg.serverContent.modelTurn.parts) || [];
     const texts = parts.map((p) => p.text).filter(Boolean);
     return texts.length ? texts.join(' ') : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pull the applicant's speech-to-text (server-side transcription of the
+// mic audio we streamed in). Requires inputAudioTranscription on the session.
+function extractInputTranscription(msg) {
+  try {
+    if (!msg) return null;
+    const inputTx =
+      msg.serverContent &&
+      msg.serverContent.inputTranscription &&
+      msg.serverContent.inputTranscription.text;
+    return inputTx || null;
   } catch {
     return null;
   }

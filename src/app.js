@@ -8,6 +8,7 @@ const morgan = require('morgan');
 const env = require('./config/env.config');
 const paymentRoutes = require('./modules/payments/payment.routes');
 const interviewRoutes = require('./modules/interviews/interview.routes');
+const userRoutes = require('./modules/users/user.routes');
 const { errorHandler, notFoundHandler } = require('./middlewares/errorHandler.middleware');
 
 const app = express();
@@ -27,6 +28,7 @@ app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 // globally here — each JSON route opts in via its own router.
 app.use('/api/payments', paymentRoutes);
 app.use('/api/interviews', interviewRoutes);
+app.use('/api/users', userRoutes);
 
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
